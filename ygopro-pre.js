@@ -8,6 +8,7 @@
  TODO：带参数运行时执行对应操作后退出
 */
 var http = require('http');
+var https = require('https');
 var sqlite3 = require('sqlite3').verbose();
 var fs = require('fs');
 var execSync = require('child_process').execSync;
@@ -15,20 +16,22 @@ var spawn = require('child_process').spawn;
 var url = require('url');
 var moment = require('moment');
 moment.locale('zh-cn');
+var loadJSON = require('load-json-file').sync;
 
-var constants = require('./constants.json');
+var auth = require('./ygopro-auth.js');
 
-var nconf = require('nconf');
-nconf.file('./config.user.json');
-var defaultconfig = require('./config.json');
-nconf.defaults(defaultconfig);
-var settings = nconf.get();
-config=settings.modules.pre_util;
+var constants = loadJSON('./data/constants.json');
+
+var settings = loadJSON('./config/config.json');
+config = settings.modules.pre_util;
+ssl_config = settings.modules.http.ssl;
 
 //全卡HTML列表
 var cardHTMLs=[];
 //http长连接
 var responder;
+//URL里的更新时间戳
+var dataver = moment().format("YYYYMMDDHHmmss");
 
 //输出反馈信息，如有http长连接则输出到http，否则输出到控制台
 var sendResponse = function(text) {
@@ -58,7 +61,7 @@ var loadDb = function(db_file) {
             
             var cardHTML="<tr>";
             
-            cardHTML+='<td><a href="'+ config.html_img_rel_path + result.id +'.jpg" target="_blank"><img src="'+config.html_img_rel_path+config.html_img_thumbnail+ result.id +'.jpg" alt="'+ result.name +'"></a></td>';
+            cardHTML+='<td><a href="'+ config.html_img_rel_path + result.id +'.jpg" target="_blank"><img data-original="'+config.html_img_rel_path+config.html_img_thumbnail+ result.id +'.jpg'+ config.html_img_thumbnail_suffix +'" alt="'+ result.name +'"></a></td>';
             cardHTML+='<td>'+ result.name +'</td>';
             
             var cardText="";
@@ -190,6 +193,7 @@ var loadDb = function(db_file) {
             sendResponse(db_file + ":" + err);
         }
         else {
+            dataver = moment().format("YYYYMMDDHHmmss");
             sendResponse("已加载数据库"+db_file+"，共"+num+"张卡。");
         }
     });
@@ -200,6 +204,8 @@ var writeToFile = function(message) {
     var fileContent=fs.readFileSync(config.html_path+config.html_filename, {"encoding":"utf-8"});
     var newContent=cardHTMLs.join("\n");
     fileContent=fileContent.replace(/<tbody class="auto-generated">[\w\W]*<\/tbody>/,'<tbody class="auto-generated">\n'+newContent+'\n</tbody>');
+    fileContent = fileContent.replace(/data-ygosrv233-download="(http.+)" href="http.+"/g, 'data-ygosrv233-download="$1" href="$1"');
+    fileContent = fileContent.replace(/href="(http.+)dataver/g, 'href="$1' + dataver);
     if (message) {
         message="<li>"+moment().format('L HH:mm')+"<ul><li>"+message.split("！换行符！").join("</li><li>")+"</li></ul></li>";
         fileContent=fileContent.replace(/<ul class="auto-generated">/,'<ul class="auto-generated">\n'+message);
@@ -254,12 +260,17 @@ var fetchDatas = function() {
 //更新本地网页到服务器，异步
 var pushDatas = function() {
     if (config.cdn.enabled) {
-        uploadCDN(config.cdn.local, config.cdn.remote, function () {
+        uploadCDN(config.cdn.local, config.cdn.remote + "/" + dataver, function () {
             uploadCDN(config.db_path + "pics", config.cdn.pics_remote + "pics", function () {
                 sendResponse("CDN上传全部完成。");
+                pushHTMLs();
             });
         });
     }
+}
+
+var pushHTMLs = function() {
+    sendResponse("开始上传到网页。");
     try {
         execSync('git add --all .', { cwd: config.git_html_path, env: process.env });
         execSync('git commit -m update-auto', { cwd: config.git_html_path, env: process.env });
@@ -342,9 +353,11 @@ var packDatas = function () {
     }
     execSync('cp -r "' + config.db_path +'expansions" "'+ config.db_path +'cdb"');
     execSync('cp -r "' + config.db_path +'script" "'+ config.db_path +'expansions/script"');
+    execSync('cp -r "' + config.db_path +'field" "'+ config.db_path +'pics/field"');
     execSync('cp -r "' + config.db_path +'pics" "'+ config.db_path +'expansions/pics"');
-    execSync('cp -r "' + config.db_path +'pics/field" "'+ config.db_path +'picture/field"');
-    var proc = spawn("7za", ["a", "-x!*.zip", "-x!mobile.cdb", "-x!cdb", "-x!script", "-x!pics", "-x!picture", "ygosrv233-pre.zip", "*"], { cwd: config.db_path, env: process.env });
+    execSync('cp -r "' + config.db_path +'picn" "'+ config.db_path +'picture/card"');
+    execSync('cp -r "' + config.db_path +'field" "'+ config.db_path +'picture/field"');
+    var proc = spawn("7za", ["a", "-x!*.zip", "-x!.git", "-x!LICENSE", "-x!README.md", "-x!mobile.cdb", "-x!cdb", "-x!picn", "-x!field", "-x!script", "-x!pics", "-x!expansions/pics/thumbnail", "-x!picture", "ygosrv233-pre.zip", "*"], { cwd: config.db_path, env: process.env });
     proc.stdout.setEncoding('utf8');
     proc.stdout.on('data', function(data) {
         //sendResponse("7z: "+data);
@@ -355,10 +368,11 @@ var packDatas = function () {
     });
     proc.on('close', function (code) {
         execSync('mv -f "' + config.db_path + 'ygosrv233-pre.zip" "' + file_path + '"');
-        execSync('rm -rf "' + config.db_path +'expansions/script" "'+ config.db_path +'expansions/pics"');
+        execSync('rm -rf "' + config.db_path +'expansions/script"');
+        execSync('rm -rf "' + config.db_path +'expansions/pics"');
         sendResponse("电脑更新包打包完成。");
     });
-    var proc2 = spawn("7za", ["a", "-x!*.zip", "-x!expansions", "-x!cdb", "-x!pics/thumbnail", "-x!picture", "ygosrv233-pre-mobile.zip", "*"], { cwd: config.db_path, env: process.env });
+    var proc2 = spawn("7za", ["a", "-x!*.zip", "-x!.git", "-x!LICENSE", "-x!README.md", "-x!expansions/pics", "-x!expansions/script", "-x!cdb", "-x!picn", "-x!field", "-x!pics/thumbnail", "-x!picture", "ygosrv233-pre-mobile.zip", "*"], { cwd: config.db_path, env: process.env });
     proc2.stdout.setEncoding('utf8');
     proc2.stdout.on('data', function(data) {
         //sendResponse("7z: "+data);
@@ -369,9 +383,10 @@ var packDatas = function () {
     });
     proc2.on('close', function (code) {
         execSync('mv -f "' + config.db_path +'ygosrv233-pre-mobile.zip" "'+ file_path +'"');
+        execSync('rm -rf "' + config.db_path +'pics/field"');
         sendResponse("手机更新包打包完成。");
     });
-    var proc3 = spawn("7za", ["a", "-x!*.zip", "-x!mobile.cdb", "-x!expansions", "-x!pics", "ygosrv233-pre-2.zip", "*"], { cwd: config.db_path, env: process.env });
+    var proc3 = spawn("7za", ["a", "-x!*.zip", "-x!.git", "-x!LICENSE", "-x!README.md", "-x!expansions", "-x!pics", "-x!picn", "-x!field", "ygosrv233-pre-2.zip", "*"], { cwd: config.db_path, env: process.env });
     proc3.stdout.setEncoding('utf8');
     proc3.stdout.on('data', function(data) {
         //sendResponse("7z: "+data);
@@ -383,16 +398,17 @@ var packDatas = function () {
     proc3.on('close', function (code) {
         execSync('mv -f "' + config.db_path + 'ygosrv233-pre-2.zip" "' + file_path + '"');
         execSync('rm -rf "' + config.db_path +'cdb"');
+        execSync('rm -rf "' + config.db_path +'picture/card"');
         execSync('rm -rf "' + config.db_path +'picture/field"');
         sendResponse("PRO2更新包打包完成。");
     });
 }
 
 //建立一个http服务器，接收API操作
-http.createServer(function (req, res) {
+function requestListener(req, res) {
     var u = url.parse(req.url, true);
     
-    if (u.query.password !== config.password) {
+    if (!auth.auth(u.query.username, u.query.password, "pre_dashboard", "pre_dashboard")) {
         res.writeHead(403);
         res.end("Auth Failed.");
         return;
@@ -426,7 +442,7 @@ http.createServer(function (req, res) {
     }
     else if (u.pathname === '/api/push_datas') {
         res.writeHead(200);
-        res.end(u.query.callback+'({"message":"开始上传到网页。"});');
+        res.end(u.query.callback+'({"message":"开始上传数据。"});');
         pushDatas();
     }
     else if (u.pathname === '/api/write_to_file') {
@@ -449,5 +465,16 @@ http.createServer(function (req, res) {
         res.end("400");
     }
 
-}).listen(config.port);
+}
 
+if (ssl_config.enabled) {
+    const ssl_cert = fs.readFileSync(ssl_config.cert);
+    const ssl_key = fs.readFileSync(ssl_config.key);
+    const options = {
+        cert: ssl_cert,
+        key: ssl_key
+    }
+    https.createServer(options, requestListener).listen(config.port);
+} else { 
+    http.createServer(requestListener).listen(config.port);
+}

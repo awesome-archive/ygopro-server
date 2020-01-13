@@ -29,7 +29,8 @@
         "34": "HS_READY",
         "35": "HS_NOTREADY",
         "36": "HS_KICK",
-        "37": "HS_START"
+        "37": "HS_START",
+        "48": "REQUEST_FIELD"
     },
     "STOC": {
         "1": "GAME_MSG",
@@ -51,7 +52,8 @@
         "25": "CHAT",
         "32": "HS_PLAYER_ENTER",
         "33": "HS_PLAYER_CHANGE",
-        "34": "HS_WATCH_CHANGE"
+        "34": "HS_WATCH_CHANGE",
+        "48": "FIELD_FINISH"
     },
     "PLAYERCHANGE":{
         "8": "OBSERVE",
@@ -94,6 +96,7 @@
         "23": "SELECT_SUM",
         "24": "SELECT_DISFIELD",
         "25": "SORT_CARD",
+        "26": "SELECT_UNSELECT_CARD",
         "30": "CONFIRM_DECKTOP",
         "31": "CONFIRM_CARDS",
         "32": "SHUFFLE_DECK",
@@ -103,8 +106,10 @@
         "36": "SHUFFLE_SET_CARD",
         "37": "REVERSE_DECK",
         "38": "DECK_TOP",
+        "39": "MSG_SHUFFLE_EXTRA",
         "40": "NEW_TURN",
         "41": "NEW_PHASE",
+        "42": "CONFIRM_EXTRATOP",
         "50": "MOVE",
         "53": "POS_CHANGE",
         "54": "SET",
@@ -148,6 +153,8 @@
         "123": "RELEASE_RELATION",
         "130": "TOSS_COIN",
         "131": "TOSS_DICE",
+        "132": "ROCK_PAPER_SCISSORS",
+        "133": "HAND_RES",
         "140": "ANNOUNCE_RACE",
         "141": "ANNOUNCE_ATTRIB",
         "142": "ANNOUNCE_CARD",
@@ -261,6 +268,14 @@
         "LINK_MARKER_TOP": 128,
         "LINK_MARKER_TOP_RIGHT": 256
     },
+    "DUEL_STAGE": {
+        "BEGIN": 0,
+        "FINGER": 1,
+        "FIRSTGO": 2,
+        "DUELING": 3,
+        "SIDING": 4,
+        "END": 5
+    },
     "COLORS": {
         "LIGHTBLUE": 8,
         "RED": 11,
@@ -274,6 +289,3 @@
         "DARKGRAY": 19
     }
 }
-
-
-

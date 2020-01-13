@@ -9,7 +9,7 @@ room_data = (room)->
   title: room.title,
   user: {username: room.username}
   users: ({username: client.name, position: client.pos} for client in room.players),
-  options: room.hostinfo,
+  options: room.get_old_hostinfo(), # Should be updated when MyCard client updates
   arena: settings.modules.arena_mode.enabled && room.arena && settings.modules.arena_mode.mode
 
 init = (http_server, ROOM_all)->
@@ -20,7 +20,7 @@ init = (http_server, ROOM_all)->
     connection.filter = url.parse(connection.upgradeReq.url, true).query.filter || 'waiting'
     connection.send JSON.stringify
       event: 'init'
-      data: room_data(room) for room in ROOM_all when room and room.established and (connection.filter == 'started' or !room.private) and (room.started == (connection.filter == 'started'))
+      data: room_data(room) for room in ROOM_all when room and room.established and (connection.filter == 'started' or !room.private) and ((room.duel_stage != 0) == (connection.filter == 'started'))
 
 create = (room)->
   broadcast('create', room_data(room), 'waiting') if !room.private
@@ -29,11 +29,11 @@ update = (room)->
   broadcast('update', room_data(room), 'waiting') if !room.private
 
 start = (room)->
-  broadcast('delete', room_data(room), 'waiting') if !room.private
+  broadcast('delete', room.name, 'waiting') if !room.private
   broadcast('create', room_data(room), 'started')
 
 _delete = (room)->
-  if(room.started)
+  if(room.duel_stage != 0)
     broadcast('delete', room.name, 'started')
   else
     broadcast('delete', room.name, 'waiting') if !room.private
@@ -53,4 +53,3 @@ module.exports =
   update: update
   start: start
   delete: _delete
-

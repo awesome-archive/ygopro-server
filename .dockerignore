@@ -34,3 +34,12 @@ ehthumbs.db
 Desktop.ini
 $RECYCLE.BIN/
 .DS_Store
+
+.git*
+.dockerignore
+.travis.yml
+Dockerfile*
+/docs
+/README.md
+/*.coffee
+/LICENSE
