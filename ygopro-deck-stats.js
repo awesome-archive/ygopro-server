@@ -6,14 +6,32 @@
  
  读取指定文件夹里所有卡组，得出卡片使用量，生成csv
 */
-var sqlite3 = require('sqlite3').verbose();
 var fs = require('fs');
-var config = require('./config.deckstats.json'); //{ "deckpath": "../decks", "dbfile": "cards.cdb" }
-var constants = require('./constants.json');
+var initSqlJs = require('sql.js');
+var loadJSON = require('load-json-file').sync;
+var config = loadJSON('./config/deckstats.json'); //{ "deckpath": "../decks", "dbfile": "cards.cdb" }
+var constants = require('./load-constants').loadConstants();
 
 var ALL_MAIN_CARDS={};
 var ALL_SIDE_CARDS={};
 var ALL_CARD_DATAS={};
+
+var sqlJsPromise;
+var SQL = null;
+function ensureSqlJs() {
+    if (!sqlJsPromise) {
+        var wasmPath = require.resolve('sql.js/dist/sql-wasm.wasm');
+        sqlJsPromise = initSqlJs({
+            locateFile: function() {
+                return wasmPath;
+            }
+        }).then(function(SQLLib) {
+            SQL = SQLLib;
+            return SQLLib;
+        });
+    }
+    return sqlJsPromise;
+}
 
 function add_to_deck(deck,id) {
     if (deck[id]) {
@@ -25,9 +43,9 @@ function add_to_deck(deck,id) {
 }
 
 function add_to_all_list(LIST,id,use) {
-	if (!ALL_CARD_DATAS[id]) {
-		return;
-	}
+    if (!ALL_CARD_DATAS[id]) {
+        return;
+    }
     if (ALL_CARD_DATAS[id].alias) {
         id=ALL_CARD_DATAS[id].alias;
     }
@@ -47,7 +65,7 @@ function add_to_all_list(LIST,id,use) {
 
 function read_deck_file(filename) {
     console.log("reading "+filename);
-    var deck_text=fs.readFileSync(config.deckpath+"\\"+filename,{encoding:"ASCII"})
+    var deck_text=fs.readFileSync(config.deckpath+"/"+filename,{encoding:"ASCII"})
     var deck_array=deck_text.split("\n");
     var deck_main={};
     var deck_side={};
@@ -69,15 +87,14 @@ function read_deck_file(filename) {
 }
 
 function load_database(callback) {
-    var db=new sqlite3.Database(config.dbfile);
-    db.each("select * from datas,texts where datas.id=texts.id", function (err,result) {
-        if (err) {
-            console.log(config.dbfile + ":" + err);
-            return;
-        }
-        else {
+    ensureSqlJs().then(function() {
+        var dbBuffer = fs.readFileSync(config.dbfile);
+        var db = new SQL.Database(dbBuffer);
+        var stmt = db.prepare("select * from datas,texts where datas.id=texts.id");
+        while (stmt.step()) {
+            var result = stmt.getAsObject();
             if (result.type & constants.TYPES.TYPE_TOKEN) {
-                return;
+                continue;
             }
             
             var card={};
@@ -86,7 +103,7 @@ function load_database(callback) {
             card.alias=result.alias;
             
             if (result.type & constants.TYPES.TYPE_MONSTER) {
-                if ((result.type & constants.TYPES.TYPE_FUSION) || (result.type & constants.TYPES.TYPE_SYNCHRO) || (result.type & constants.TYPES.TYPE_XYZ))
+                if ((result.type & constants.TYPES.TYPE_FUSION) || (result.type & constants.TYPES.TYPE_SYNCHRO) || (result.type & constants.TYPES.TYPE_XYZ) || (result.type & constants.TYPES.TYPE_LINK))
                     card.type="额外";
                 else
                     card.type="怪兽";
@@ -122,6 +139,7 @@ function load_database(callback) {
             if (result.type & constants.TYPES.TYPE_TOON) {cardTypes.push("卡通");}
             if (result.type & constants.TYPES.TYPE_XYZ) {cardTypes.push("超量");}
             if (result.type & constants.TYPES.TYPE_PENDULUM) {cardTypes.push("灵摆");}
+            if (result.type & constants.TYPES.TYPE_LINK) {cardTypes.push("连接");}
             card.fulltype=cardTypes.join('|');
             
             if (result.type & constants.TYPES.TYPE_MONSTER) {
@@ -138,7 +156,17 @@ function load_database(callback) {
             
             ALL_CARD_DATAS[result.id]=card;
         }
-    }, callback);
+        stmt.free();
+        db.close();
+        if (callback) {
+            callback();
+        }
+    }).catch(function(err) {
+        console.log(config.dbfile + ":" + err);
+        if (callback) {
+            callback(err);
+        }
+    });
 }
 
 function read_decks() {
@@ -166,6 +194,9 @@ function output_csv(list,filename) {
     var file=fs.openSync(filename,"w");
     for (var i in list) {
         var card=ALL_CARD_DATAS[i];
+        if (!card) {
+            continue;
+        }
         var card_usage=list[i];
         
         console.log("writing "+card.name);
@@ -185,5 +216,8 @@ function output_csv(list,filename) {
     }
 }
 
-load_database(read_decks);
-
+ensureSqlJs().then(function() {
+    load_database(read_decks);
+}).catch(function(err) {
+    console.error("Failed to load sql.js: " + err);
+});

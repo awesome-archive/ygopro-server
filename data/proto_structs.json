@@ -1,14 +1,15 @@
 {
     "CTOS":{
         "RESPONSE": "",
-        "HAND_RESULT": "",
-        "TP_RESULT": "",
+        "HAND_RESULT": "CTOS_HandResult",
+        "TP_RESULT": "CTOS_TPResult",
         "PLAYER_INFO": "CTOS_PlayerInfo",
         "JOIN_GAME":"CTOS_JoinGame",
         "HS_KICK":"CTOS_Kick",
         "UPDATE_DECK": "deck",
         "CHANGE_SIDE":"",
-        "CHAT": "chat"
+        "CHAT": "chat",
+        "EXTERNAL_ADDRESS": "CTOS_ExternalAddress"
     },
     "STOC":{
         "JOIN_GAME":"STOC_JoinGame",
@@ -20,7 +21,10 @@
         "GAME_MSG": "GameMsg_Hint_Card_only",
         "SELECT_HAND": "",
         "SELECT_TP": "",
+        "HAND_RESULT": "STOC_HandResult",
         "REPLAY": "",
-        "CHAT": "STOC_Chat"
+        "TIME_LIMIT": "STOC_TimeLimit",
+        "CHAT": "STOC_Chat",
+        "DECK_COUNT": "STOC_DeckCount"
     }
 }

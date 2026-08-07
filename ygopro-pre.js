@@ -8,27 +8,51 @@
  TODO：带参数运行时执行对应操作后退出
 */
 var http = require('http');
-var sqlite3 = require('sqlite3').verbose();
+var https = require('https');
 var fs = require('fs');
+var initSqlJs = require('sql.js');
+var exec = require('child_process').exec;
 var execSync = require('child_process').execSync;
 var spawn = require('child_process').spawn;
 var url = require('url');
+var util = require('util');
 var moment = require('moment');
 moment.locale('zh-cn');
+var loadJSON = require('load-json-file').sync;
 
-var constants = require('./constants.json');
+var auth = require('./ygopro-auth.js');
 
-var nconf = require('nconf');
-nconf.file('./config.user.json');
-var defaultconfig = require('./config.json');
-nconf.defaults(defaultconfig);
-var settings = nconf.get();
-config=settings.modules.pre_util;
+var constants = require('./load-constants').loadConstants();
+
+var settings = loadJSON('./config/config.json');
+config = settings.modules.pre_util;
+ssl_config = settings.modules.http.ssl;
 
 //全卡HTML列表
 var cardHTMLs=[];
 //http长连接
 var responder;
+//URL里的更新时间戳
+var dataver = moment().format("YYYYMMDDHHmmss");
+
+var sqlJsPromise;
+var SQL = null;
+function ensureSqlJs() {
+    if (!sqlJsPromise) {
+        var wasmPath = require.resolve('sql.js/dist/sql-wasm.wasm');
+        sqlJsPromise = initSqlJs({
+            locateFile: function() {
+                return wasmPath;
+            }
+        }).then(function(SQLLib) {
+            SQL = SQLLib;
+            return SQLLib;
+        });
+    }
+    return sqlJsPromise;
+}
+
+var execAsync = util.promisify(exec);
 
 //输出反馈信息，如有http长连接则输出到http，否则输出到控制台
 var sendResponse = function(text) {
@@ -43,22 +67,21 @@ var sendResponse = function(text) {
 }
 
 //读取数据库内内容到cardHTMLs，异步
-var loadDb = function(db_file) {
-    var db = new sqlite3.Database(db_file);
-    
-    db.each("select * from datas,texts where datas.id=texts.id", function (err,result) {
-        if (err) {
-            sendResponse(db_file + ":" + err);
-            return;
-        }
-        else {
+var loadDb = function(db_file, callback) {
+    ensureSqlJs().then(function() {
+        var dbBuffer = fs.readFileSync(db_file);
+        var db = new SQL.Database(dbBuffer);
+        var stmt = db.prepare("select * from datas,texts where datas.id=texts.id");
+        var num = 0;
+        while (stmt.step()) {
+            var result = stmt.getAsObject();
             if (result.type & constants.TYPES.TYPE_TOKEN) {
-                return;
+                continue;
             }
-            
+
             var cardHTML="<tr>";
             
-            cardHTML+='<td><a href="'+ config.html_img_rel_path + result.id +'.jpg" target="_blank"><img src="'+config.html_img_rel_path+config.html_img_thumbnail+ result.id +'.jpg" alt="'+ result.name +'"></a></td>';
+            cardHTML+='<td><a href="'+ config.html_img_rel_path + result.id +'.jpg" target="_blank"><img data-original="'+config.html_img_rel_path+config.html_img_thumbnail+ result.id +'.jpg'+ config.html_img_thumbnail_suffix +'" alt="'+ result.name +'"></a></td>';
             cardHTML+='<td>'+ result.name +'</td>';
             
             var cardText="";
@@ -118,6 +141,7 @@ var loadDb = function(db_file) {
                 if (result.race & constants.RACES.RACE_CREATORGOD) {cardRace="创造神";}
                 if (result.race & constants.RACES.RACE_WYRM) {cardRace="幻龙";}
                 if (result.race & constants.RACES.RACE_CYBERS) {cardRace="电子界";}
+                if (result.race & constants.RACES.RACE_ILLUSION) {cardRace = "幻想魔";}
                 cardText+=" "+ cardRace;
                 
                 var cardAttr="";
@@ -184,42 +208,68 @@ var loadDb = function(db_file) {
             cardHTML+='</tr>';
             
             cardHTMLs.push(cardHTML);
+            num++;
         }
-    }, function(err, num) {
-        if(err) {
-            sendResponse(db_file + ":" + err);
-        }
-        else {
-            sendResponse("已加载数据库"+db_file+"，共"+num+"张卡。");
-        }
+        stmt.free();
+        db.close();
+        dataver = moment().format("YYYYMMDDHHmmss");
+        sendResponse("已加载数据库"+db_file+"，共"+num+"张卡。");
+        callback(null, num);
+    }).catch(function(err) {
+        sendResponse(db_file + ":" + err);
+        callback(err);
     });
 }
 
 //将cardHTMLs中内容更新到指定列表页，同步
-var writeToFile = function(message) {
-    var fileContent=fs.readFileSync(config.html_path+config.html_filename, {"encoding":"utf-8"});
-    var newContent=cardHTMLs.join("\n");
-    fileContent=fileContent.replace(/<tbody class="auto-generated">[\w\W]*<\/tbody>/,'<tbody class="auto-generated">\n'+newContent+'\n</tbody>');
-    if (message) {
-        message="<li>"+moment().format('L HH:mm')+"<ul><li>"+message.split("！换行符！").join("</li><li>")+"</li></ul></li>";
-        fileContent=fileContent.replace(/<ul class="auto-generated">/,'<ul class="auto-generated">\n'+message);
-    }
-    fs.writeFileSync(config.html_path+config.html_filename, fileContent);
-    sendResponse("列表更新完成。");
-    if (!config.cdn.enabled) {
-        copyImages();
+var writeToFile = async function(message, callback) {
+    try {
+        var fileContent=fs.readFileSync(config.html_path+config.html_filename, {"encoding":"utf-8"});
+        var newContent=cardHTMLs.join("\n");
+        fileContent=fileContent.replace(/<tbody class="auto-generated">[\w\W]*<\/tbody>/,'<tbody class="auto-generated">\n'+newContent+'\n</tbody>');
+        fileContent = fileContent.replace(/data-ygosrv233-download="(http.+)" href="http.+"/g, 'data-ygosrv233-download="$1" href="$1"');
+        fileContent = fileContent.replace(/href="(http.+)dataver/g, 'href="$1' + dataver);
+        if (message) {
+            message="<li>"+moment().format('L HH:mm')+"<ul><li>"+message.split("！换行符！").join("</li><li>")+"</li></ul></li>";
+            fileContent=fileContent.replace(/<ul class="auto-generated">/,'<ul class="auto-generated">\n'+message);
+        }
+        await fs.promises.writeFile(config.html_path + config.html_filename, fileContent);
+        if (!config.cdn.enabled) {
+            await util.promisify(copyImages)();
+        }
+        sendResponse("列表更新完成。");
+        callback(null);
+    } catch (err) {
+        callback(err);
     }
 }
 
 //读取指定文件夹里所有数据库，异步
-var loadAllDbs = function() {
-    cardHTMLs=[];
-    var files = fs.readdirSync(config.db_path+"expansions/");
-    for (var i in files) {
-        var filename = files[i];
-        if (filename.slice(-4) === ".cdb" && (!config.only_show_dbs || config.only_show_dbs.length==0 || config.only_show_dbs[filename])) {
-            loadDb(config.db_path+"expansions/"+filename);
+var loadAllDbs = async function(callback) {
+    try {
+        cardHTMLs=[];
+        var files = await fs.promises.readdir(config.db_path + "expansions/");
+        var list = files.filter((filename) => { 
+            return filename.slice(-4) === ".cdb" && (!config.only_show_dbs || config.only_show_dbs.length == 0 || config.only_show_dbs[filename]);
+        }).map(filename => config.db_path + "expansions/" + filename);
+        for (var i = 0; i < list.length; i++) {
+            await util.promisify(loadDb)(list[i]);
         }
+        callback(null);
+    } catch (err) {
+        callback(err);
+    }
+}
+
+
+async function execCommands(commands, callback) { 
+    try {
+        for (var i = 0; i < commands.length; i++) {
+            await execAsync(commands[i]);
+        }
+        callback(null);
+    } catch (err) {
+        callback(err);
     }
 }
 
@@ -252,14 +302,22 @@ var fetchDatas = function() {
 }
 
 //更新本地网页到服务器，异步
-var pushDatas = function() {
-    if (config.cdn.enabled) {
-        uploadCDN(config.cdn.local, config.cdn.remote, function () {
-            uploadCDN(config.db_path + "pics", config.cdn.pics_remote + "pics", function () {
-                sendResponse("CDN上传全部完成。");
-            });
-        });
+var pushDatas = async function(callback) {
+    try {
+        if (config.cdn.enabled) {
+            await util.promisify(uploadCDN)(config.cdn.local, config.cdn.remote + "/" + dataver);
+            await util.promisify(uploadCDN)(config.db_path + "pics", config.cdn.pics_remote + "pics");
+            sendResponse("CDN上传全部完成。");
+            await util.promisify(pushHTMLs)();
+        }
+        callback(null);
+    } catch (err) {
+        callback(err);
     }
+}
+
+var pushHTMLs = function(callback) {
+    sendResponse("开始上传到网页。");
     try {
         execSync('git add --all .', { cwd: config.git_html_path, env: process.env });
         execSync('git commit -m update-auto', { cwd: config.git_html_path, env: process.env });
@@ -284,6 +342,7 @@ var pushDatas = function() {
         proc.on('close', (function(git) {
             return function(code) {
                 sendResponse(git.name + "上传完成。");
+                callback();
             }
         })(git));
     }
@@ -314,37 +373,44 @@ var uploadCDN = function(local, remote, callback) {
     });
 }
 
-//将数据库文件夹里卡图复制到列表页对应文件夹里，同步
-var copyImages = function() {
-    execSync('rm -rf "' + config.html_path+config.html_img_rel_path +'"');
-    execSync('cp -r "' + config.db_path + 'pics' + '" "' + config.html_path + config.html_img_rel_path + '"');
-    execSync('rm -rf "' + config.html_path+config.html_img_rel_path +'field"');
-    sendResponse("卡图复制完成。");
+//将数据库文件夹里卡图复制到列表页对应文件夹里，异步
+var copyImages = function (callback) {
+    const commands = [
+        'rm -rf "' + config.html_path + config.html_img_rel_path + '"',
+        'cp -r "' + config.db_path + 'pics' + '" "' + config.html_path + config.html_img_rel_path + '"',
+        'rm -rf "' + config.html_path+config.html_img_rel_path +'field"',
+    ]
+    execCommands(commands, (err) => {
+        if (err) {
+            sendResponse("卡图复制失败: " + err.toString());
+        } else {
+            sendResponse("卡图复制完成。");
+        }
+        callback(err);
+    });
+    
 }
 
 //将数据库文件夹复制到YGOPRO文件夹里，同步
-var copyToYGOPRO = function() {
-    execSync('rm -rf ' + config.ygopro_path + 'expansions/*' + '');
-    execSync('cp -rf "' + config.db_path + 'expansions' + '" "' + config.ygopro_path + '"');
-    execSync('cp -rf "' + config.db_path + 'script' + '" "' + config.ygopro_path + 'expansions"');
-    try {
-        execSync('cp -rf "' + config.db_path + 'lflist.conf' + '" "' + config.ygopro_path + '"');
-    }
-    catch (e) {}
-    sendResponse("更新完成。");
+var copyToYGOPRO = function(callback) {
+    const commands = [
+        'rm -rf ' + config.ygopro_path + 'expansions/*' + '',
+        'cp -rf "' + config.db_path + 'expansions' + '" "' + config.ygopro_path + '"',
+        'cp -rf "' + config.db_path + 'script' + '" "' + config.ygopro_path + 'expansions"',
+        'cp -rf "' + config.db_path + 'lflist.conf' + '" "' + config.ygopro_path + '" || true'
+    ]
+    execCommands(commands, (err) => {
+        if (err) {
+            sendResponse("更新失败: " + err.toString());
+        } else {
+            sendResponse("更新完成。");
+        }
+        callback(err);
+    });
 }
 
-//生成更新包，异步
-var packDatas = function () {
-    file_path = config.html_path;
-    if (config.cdn.enabled) {
-        file_path = config.cdn.local;
-    }
-    execSync('cp -r "' + config.db_path +'expansions" "'+ config.db_path +'cdb"');
-    execSync('cp -r "' + config.db_path +'script" "'+ config.db_path +'expansions/script"');
-    execSync('cp -r "' + config.db_path +'pics" "'+ config.db_path +'expansions/pics"');
-    execSync('cp -r "' + config.db_path +'pics/field" "'+ config.db_path +'picture/field"');
-    var proc = spawn("7za", ["a", "-x!*.zip", "-x!mobile.cdb", "-x!cdb", "-x!script", "-x!pics", "-x!picture", "ygosrv233-pre.zip", "*"], { cwd: config.db_path, env: process.env });
+function run7z(params, cwd, callback) { 
+    let proc = spawn(settings.modules.tournament_mode.replay_archive_tool, params, { cwd: cwd, env: process.env });
     proc.stdout.setEncoding('utf8');
     proc.stdout.on('data', function(data) {
         //sendResponse("7z: "+data);
@@ -354,45 +420,90 @@ var packDatas = function () {
         sendResponse("7z error: "+data);
     });
     proc.on('close', function (code) {
-        execSync('mv -f "' + config.db_path + 'ygosrv233-pre.zip" "' + file_path + '"');
-        execSync('rm -rf "' + config.db_path +'expansions/script" "'+ config.db_path +'expansions/pics"');
+        callback(code === 0 ? null : "exit " + code);
+    });
+} 
+
+//生成更新包，异步
+var packDatas = async function (callback) {
+    file_path = config.html_path;
+    if (config.cdn.enabled) {
+        file_path = config.cdn.local;
+    }
+    try {
+        await util.promisify(execCommands)([
+            'rm -rf "' + config.db_path +'expansions/' + config.ypk_name + '"',
+            'rm -rf "' + config.db_path +'expansions/script"',
+            'rm -rf "' + config.db_path +'expansions/pics"',
+            'rm -rf "' + config.db_path +'cdb"',
+            'rm -rf "' + config.db_path +'picture"',
+            'mkdir "' + config.db_path +'picture"',
+            'cp -r "' + config.db_path + 'expansions" "' + config.db_path + 'cdb"',
+            'cp -r "' + config.db_path + 'pics" "' + config.db_path + 'expansions/pics"',
+            'cp -r "' + config.db_path + 'field" "' + config.db_path + 'expansions/pics/field"',
+            'cp -r "' + config.db_path + 'script" "' + config.db_path + 'expansions/script"',
+            'cp -r "' + config.db_path + 'pics" "' + config.db_path + 'picture/card"',
+            'cp -r "' + config.db_path + 'field" "' + config.db_path + 'picture/field"'
+        ]);
+        await util.promisify(run7z)(["a", "-tzip", "-x!*.ypk", config.ypk_name, "*"], config.db_path + "expansions/");
+        await util.promisify(run7z)(["a", "-x!*.zip", "-x!.git", "-x!LICENSE", "-x!README.md",
+                    "-x!cdb", "-x!picture", "-x!field", "-x!script", "-x!pics",
+                    "-x!expansions/pics", "-x!expansions/script", "-x!expansions/*.cdb", "-x!expansions/*.conf",
+                    "ygosrv233-pre.zip", "*"], config.db_path);
+        await util.promisify(execCommands)([
+            'mv -f "' + config.db_path + 'ygosrv233-pre.zip" "' + file_path + '"'
+        ]);
         sendResponse("电脑更新包打包完成。");
-    });
-    var proc2 = spawn("7za", ["a", "-x!*.zip", "-x!expansions", "-x!cdb", "-x!pics/thumbnail", "-x!picture", "ygosrv233-pre-mobile.zip", "*"], { cwd: config.db_path, env: process.env });
-    proc2.stdout.setEncoding('utf8');
-    proc2.stdout.on('data', function(data) {
-        //sendResponse("7z: "+data);
-    });
-    proc2.stderr.setEncoding('utf8');
-    proc2.stderr.on('data', function(data) {
-        sendResponse("7z error: "+data);
-    });
-    proc2.on('close', function (code) {
-        execSync('mv -f "' + config.db_path +'ygosrv233-pre-mobile.zip" "'+ file_path +'"');
+        await util.promisify(run7z)(["a", "-x!*.zip", "-x!.git", "-x!LICENSE", "-x!README.md",
+                    "-x!cdb", "-x!picture", "-x!field", "-x!script", "-x!pics",
+                    "-x!expansions/pics", "-x!expansions/script", "-x!expansions/*.cdb", "-x!expansions/*.conf",
+                    "ygosrv233-pre-mobile.zip", "*"], config.db_path);
+        await util.promisify(execCommands)([
+            'mv -f "' + config.db_path +'ygosrv233-pre-mobile.zip" "'+ file_path +'"',
+            'rm -rf "' + config.db_path +'expansions/' + config.ypk_name + '"',
+            'rm -rf "' + config.db_path +'expansions/script"',
+            'rm -rf "' + config.db_path +'expansions/pics"'
+        ]);
         sendResponse("手机更新包打包完成。");
-    });
-    var proc3 = spawn("7za", ["a", "-x!*.zip", "-x!mobile.cdb", "-x!expansions", "-x!pics", "ygosrv233-pre-2.zip", "*"], { cwd: config.db_path, env: process.env });
-    proc3.stdout.setEncoding('utf8');
-    proc3.stdout.on('data', function(data) {
-        //sendResponse("7z: "+data);
-    });
-    proc3.stderr.setEncoding('utf8');
-    proc3.stderr.on('data', function(data) {
-        sendResponse("7z error: "+data);
-    });
-    proc3.on('close', function (code) {
-        execSync('mv -f "' + config.db_path + 'ygosrv233-pre-2.zip" "' + file_path + '"');
-        execSync('rm -rf "' + config.db_path +'cdb"');
-        execSync('rm -rf "' + config.db_path +'picture/field"');
-        sendResponse("PRO2更新包打包完成。");
-    });
+        await util.promisify(run7z)(["a", "-x!*.zip", "-x!.git", "-x!LICENSE", "-x!README.md",
+                    "-x!expansions", "-x!pics", "-x!field",
+                    "ygosrv233-pre-2.zip", "*"], config.db_path);
+        await util.promisify(execCommands)([
+            'mv -f "' + config.db_path + 'ygosrv233-pre-2.zip" "' + file_path + '"',
+            'rm -rf "' + config.db_path +'cdb"',
+            'rm -rf "' + config.db_path +'picture"'
+        ]);
+        sendResponse("Pro2更新包打包完成。");
+        callback(null);
+    } catch (err) {
+        callback(err);
+    }
 }
 
 //建立一个http服务器，接收API操作
-http.createServer(function (req, res) {
+async function requestListener(req, res) {
     var u = url.parse(req.url, true);
+
+    // Allow all CORS + PNA (Private Network Access) requests.
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Private-Network", "true");
+    res.setHeader("Vary", "Origin, Access-Control-Request-Headers, Access-Control-Request-Method");
+    if ((req.method || "").toLowerCase() === "options") {
+        const requestHeaders = req.headers["access-control-request-headers"];
+        res.writeHead(204, {
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+            "Access-Control-Allow-Headers": Array.isArray(requestHeaders)
+                ? requestHeaders.join(", ")
+                : requestHeaders || "*",
+            "Access-Control-Allow-Private-Network": "true",
+            "Access-Control-Max-Age": "86400"
+        });
+        res.end();
+        return;
+    }
     
-    if (u.query.password !== config.password) {
+    if (!await auth.auth(u.query.username, u.query.password, "pre_dashboard", "pre_dashboard")) {
         res.writeHead(403);
         res.end("Auth Failed.");
         return;
@@ -417,7 +528,7 @@ http.createServer(function (req, res) {
     else if (u.pathname === '/api/load_db') {
         res.writeHead(200);
         res.end(u.query.callback+'({"message":"开始加载数据库。"});');
-        loadAllDbs();
+        await util.promisify(loadAllDbs)();
     }
     else if (u.pathname === '/api/fetch_datas') {
         res.writeHead(200);
@@ -426,28 +537,45 @@ http.createServer(function (req, res) {
     }
     else if (u.pathname === '/api/push_datas') {
         res.writeHead(200);
-        res.end(u.query.callback+'({"message":"开始上传到网页。"});');
-        pushDatas();
+        res.end(u.query.callback + '({"message":"开始上传数据。"});');
+        await util.promisify(pushDatas)();
     }
     else if (u.pathname === '/api/write_to_file') {
         res.writeHead(200);
         res.end(u.query.callback+'({"message":"开始写列表页。"});');
-        writeToFile(u.query.message);
+        await util.promisify(writeToFile)(u.query.message);
     }
     else if (u.pathname === '/api/copy_to_ygopro') {
         res.writeHead(200);
         res.end(u.query.callback+'({"message":"开始更新到服务器。"});');
-        copyToYGOPRO();
+        await util.promisify(copyToYGOPRO)();
     }
     else if (u.pathname === '/api/pack_data') {
         res.writeHead(200);
         res.end(u.query.callback+'({"message":"开始生成更新包。"});');
-        packDatas();
+        await util.promisify(packDatas)();
     }
     else {
         res.writeHead(400);
         res.end("400");
     }
 
-}).listen(config.port);
+}
 
+function startServer() {
+    if (ssl_config.enabled) {
+        const ssl_cert = fs.readFileSync(ssl_config.cert);
+        const ssl_key = fs.readFileSync(ssl_config.key);
+        const options = {
+            cert: ssl_cert,
+            key: ssl_key
+        }
+        https.createServer(options, requestListener).listen(config.port);
+    } else { 
+        http.createServer(requestListener).listen(config.port);
+    }
+}
+
+ensureSqlJs().then(startServer).catch(function(err) {
+    console.error("Failed to load sql.js: " + err);
+});

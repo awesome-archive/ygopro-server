@@ -2,23 +2,33 @@
 jsconfig.json
 coffeelint.json
 .vscode/
+.idea
 
 password.json
 config.*.json
+config.user.bak
 
+/bak
+/config
 /ygopro
 /windbot
-/decks/
+/decks
 /decks_save*
-/node_modules/
+/deck_log
+/replays
+/node_modules
 /ssl
 /ygosrv233
+/challonge
+/logs
+/plugins
 
 test*
 *.heapsnapshot
 *.tmp
 *.bak
 *.log
+log.*
 
 *.map
 
@@ -27,3 +37,4 @@ ehthumbs.db
 Desktop.ini
 $RECYCLE.BIN/
 .DS_Store
+/scripts
